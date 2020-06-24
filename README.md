@@ -1,4 +1,4 @@
-# updating this repo
+# Updating this repo
 
 * Remove bar \& progressbar which is not support by pytorch 1.2+
 
