@@ -19,10 +19,10 @@ import torch.utils.data as data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import models.cifar as models
-from tqdm import tqdm
+import pdb
+from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 
-from utils import Logger, AverageMeter, accuracy, mkdir_p, savefig
-
+from matplotlib import pyplot as plt
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -38,7 +38,7 @@ parser.add_argument('--epochs', default=300, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('--train-batch', default=128, type=int, metavar='N',
+parser.add_argument('--train-batch', default=256, type=int, metavar='N',
                     help='train batchsize')
 parser.add_argument('--test-batch', default=20, type=int, metavar='N',
                     help='test batchsize')
@@ -76,8 +76,10 @@ parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 #Device options
-parser.add_argument('--gpu-id', default='0', type=str,
-                    help='id(s) for CUDA_VISIBLE_DEVICES')
+parser.add_argument('--split_gpu', default=2, type=int,
+                    help='parallel on 2 gpu')
+parser.add_argument('--split_size', default=64, type=int,
+                    help='pipeling inputs, split 128 batch into 64 first, 64 second')
 
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
@@ -86,9 +88,23 @@ state = {k: v for k, v in args._get_kwargs()}
 assert args.dataset == 'cifar10' or args.dataset == 'cifar100', 'Dataset can only be cifar10 or cifar100.'
 
 # Use CUDA
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
+os.environ['CUDA_VISIBLE_DEVICES'] = "0, 1, 2, 3, 4, 5, 6, 7, 8, 9"
 use_cuda = torch.cuda.is_available()
-
+if args.split_gpu == 0:
+    device_start = "cuda:0"
+    device_end = "cuda:0"
+if args.split_gpu == 2:
+    device_start = "cuda:0"
+    device_end = "cuda:1"
+if args.split_gpu == 4:
+    device_start = "cuda:0"
+    device_end = "cuda:3"
+if args.split_gpu == 5:
+    device_start = "cuda:0"
+    device_end = "cuda:4"
+if args.split_gpu == 10:
+    device_start = "cuda:0"
+    device_end = "cuda:9"
 # Random seed
 if args.manualSeed is None:
     args.manualSeed = random.randint(1, 10000)
@@ -96,8 +112,11 @@ random.seed(args.manualSeed)
 torch.manual_seed(args.manualSeed)
 if use_cuda:
     torch.cuda.manual_seed_all(args.manualSeed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 best_acc = 0  # best test accuracy
+train_time = []
 
 def main():
     global best_acc
@@ -106,8 +125,8 @@ def main():
     if not os.path.isdir(args.checkpoint):
         mkdir_p(args.checkpoint)
 
-
-
+    split_size = [1, 3, 5, 8, 10, 12, 20, 40, 60]
+    model_list= []
     # Data
     print('==> Preparing dataset %s' % args.dataset)
     transform_train = transforms.Compose([
@@ -130,7 +149,7 @@ def main():
 
 
     trainset = dataloader(root='./data', train=True, download=True, transform=transform_train)
-    trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=True, num_workers=args.workers)
+    trainloader = data.DataLoader(trainset, batch_size=args.train_batch, shuffle=False, num_workers=args.workers)
 
     testset = dataloader(root='./data', train=False, download=False, transform=transform_test)
     testloader = data.DataLoader(testset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
@@ -160,18 +179,29 @@ def main():
                     widen_factor=args.widen_factor,
                     dropRate=args.drop,
                 )
-    elif args.arch.endswith('resnet'):
-        model = models.__dict__[args.arch](
+    elif args.arch.startswith('vgg19_bn_para'):
+        model = models.__dict__['vgg19_bn_para'](
                     num_classes=num_classes,
-                    depth=args.depth,
-                    block_name=args.block_name,
+                    gpu_num = args.split_gpu,
+                    split_size=args.split_size
                 )
+    elif args.arch.endswith('resnet164_para'):
+        #for size in split_size:
+        model = models.__dict__['resnet164_para'](
+                        num_classes=num_classes,
+                        depth=args.depth,
+                        block_name='bottleneck',
+                        split_size= args.split_size,
+                        gpu_num = args.split_gpu
+                    )
+        #model = load_pretrain_model('paraelle_resnet164', 'cifar', 'model_3', 10)
     else:
         model = models.__dict__[args.arch](num_classes=num_classes)
-    print(model)
-
-    model = torch.nn.DataParallel(model).cuda()
-    cudnn.benchmark = True
+        
+    #if args.arch in ['vgg19_bn_para', 'resnet164_para']:
+     #   print_model(args.arch, model)
+    #model = torch.nn.DataParallel(model).cuda()
+    #pdb.set_trace()
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -193,35 +223,32 @@ def main():
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
         logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Acc.', 'Valid Acc.'])
 
-
     if args.evaluate:
         print('\nEvaluation only')
         test_loss, test_acc = test(testloader, model, criterion, start_epoch, use_cuda)
         print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
-        return
 
     # Train and val
     for epoch in range(start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
 
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
-
         train_loss, train_acc = train(trainloader, model, criterion, optimizer, epoch, use_cuda)
         test_loss, test_acc = test(testloader, model, criterion, epoch, use_cuda)
 
-        # append logger file
+        #append logger file
         logger.append([state['lr'], train_loss, test_loss, train_acc, test_acc])
 
-        # save model
+        #save model
         is_best = test_acc > best_acc
         best_acc = max(test_acc, best_acc)
         save_checkpoint({
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'acc': test_acc,
-                'best_acc': best_acc,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best, checkpoint=args.checkpoint)
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'acc': test_acc,
+                    'best_acc': best_acc,
+                    'optimizer' : optimizer.state_dict(),
+                }, is_best, checkpoint=args.checkpoint)
 
     logger.close()
     logger.plot()
@@ -229,8 +256,11 @@ def main():
 
     print('Best acc:')
     print(best_acc)
+    # print(split_size)
+    # print(train_time)
 
 def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
+    global train_time
     # switch to train mode
     model.train()
 
@@ -241,15 +271,14 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
     top5 = AverageMeter()
     end = time.time()
 
-    # bar = Bar('Processing', max=len(trainloader))
-    for batch_idx, (inputs, targets) in tqdm(enumerate(trainloader)):
+    bar = Bar('Processing', max=len(trainloader))
+    for batch_idx, (inputs, targets) in enumerate(trainloader):
         # measure data loading time
         data_time.update(time.time() - end)
 
         if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda(async=True)
+            inputs, targets = inputs.cuda(device_start), targets.cuda(device_end, non_blocking=True)
         inputs, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets)
-
         # compute output
         outputs = model(inputs)
         loss = criterion(outputs, targets)
@@ -268,21 +297,23 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-
         # plot progress
-    #     bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
-    #                 batch=batch_idx + 1,
-    #                 size=len(trainloader),
-    #                 data=data_time.avg,
-    #                 bt=batch_time.avg,
-    #                 total=bar.elapsed_td,
-    #                 eta=bar.eta_td,
-    #                 loss=losses.avg,
-    #                 top1=top1.avg,
-    #                 top5=top5.avg,
-    #                 )
-    #     bar.next()
-    # bar.finish()
+        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                    batch=batch_idx + 1,
+                    size=len(trainloader),
+                    data=data_time.avg,
+                    bt=batch_time.avg,
+                    total=bar.elapsed_td,
+                    eta=bar.eta_td,
+                    loss=losses.avg,
+                    top1=top1.avg,
+                    top5=top5.avg,
+                    )
+        bar.next()
+        #train_time.append(bar.elapsed_td)
+        #bar.finish()
+        #break
+    bar.finish()
     return (losses.avg, top1.avg)
 
 def test(testloader, model, criterion, epoch, use_cuda):
@@ -298,13 +329,13 @@ def test(testloader, model, criterion, epoch, use_cuda):
     model.eval()
 
     end = time.time()
-    # bar = Bar('Processing', max=len(testloader))
-    for batch_idx, (inputs, targets) in tqdm(enumerate(testloader)):
+    bar = Bar('Processing', max=len(testloader))
+    for batch_idx, (inputs, targets) in enumerate(testloader):
         # measure data loading time
         data_time.update(time.time() - end)
 
         if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda()
+            inputs, targets = inputs.cuda(device_start), targets.cuda(device_end)
         inputs, targets = torch.autograd.Variable(inputs, volatile=True), torch.autograd.Variable(targets)
 
         # compute output
@@ -322,19 +353,19 @@ def test(testloader, model, criterion, epoch, use_cuda):
         end = time.time()
 
         # plot progress
-    #     bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
-    #                 batch=batch_idx + 1,
-    #                 size=len(testloader),
-    #                 data=data_time.avg,
-    #                 bt=batch_time.avg,
-    #                 total=bar.elapsed_td,
-    #                 eta=bar.eta_td,
-    #                 loss=losses.avg,
-    #                 top1=top1.avg,
-    #                 top5=top5.avg,
-    #                 )
-    #     bar.next()
-    # bar.finish()
+        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                    batch=batch_idx + 1,
+                    size=len(testloader),
+                    data=data_time.avg,
+                    bt=batch_time.avg,
+                    total=bar.elapsed_td,
+                    eta=bar.eta_td,
+                    loss=losses.avg,
+                    top1=top1.avg,
+                    top5=top5.avg,
+                    )
+        bar.next()
+    bar.finish()
     return (losses.avg, top1.avg)
 
 def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
@@ -349,6 +380,56 @@ def adjust_learning_rate(optimizer, epoch):
         state['lr'] *= args.gamma
         for param_group in optimizer.param_groups:
             param_group['lr'] = state['lr']
+
+def load_pretrain_model(arch, dataset, resume_checkpoint, num_classes): 
+    print("loading model_3")
+    checkpoint = torch.load(resume_checkpoint)
+    model = models.__dict__[arch](num_classes=num_classes)  
+    state_dict = {}
+    # deal with old torch version
+    print(checkpoint)
+    for k, v in checkpoint['net'].items():
+        state_dict[k.replace('module.', '')] = v
+    model.load_state_dict(state_dict)
+    return model
+
+def load_model(device):
+    return torch.load("./model_" + str(device))
+
+def print_model(model_name, model):
+    if model_name == 'vgg19_bn_para':
+        if model.gpu_para == 2:
+            for block in [model.features_1, model.features_2]:
+                for layer in range(len(block)):
+                    if type(block[layer])!= nn.ReLU and type(block[layer])!= nn.MaxPool2d:
+                        print(block[layer], block[layer].weight.device)
+        elif model.gpu_para == 5:
+            for block in [model.features_1, model.features_2, model.features_3, model.features_4, model.features_5]:
+                for layer in range(len(block)):
+                    if type(block[layer])!= nn.ReLU and type(block[layer])!= nn.MaxPool2d:
+                        print(block[layer], block[layer].weight.device)
+        elif model.gpu_para == 10:
+            for block in [model.features_1, model.features_2, model.features_3, model.features_4, model.features_5,
+                        model.features_6, model.features_7, model.features_8, model.features_9, model.features_10]:
+                for layer in range(len(block)):
+                    if type(block[layer])!= nn.ReLU and type(block[layer])!= nn.MaxPool2d:
+                        print(block[layer], block[layer].weight.device)
+        print(model.classifier, "gpu: ", model.classifier.weight.device)
+    elif model_name == 'resnet164_para':
+        print(model.conv1, " weight on ", model.conv1.weight.device)
+        print(model.bn1, " weight on ", model.bn1.weight.device)
+        print(model.relu, " relu layer has no weights")
+        for layer_index, layer in enumerate([model.layer1, model.layer2, model.layer3]):
+            for index, block in enumerate(layer):
+                for i in [block.conv1, block.bn1, block.conv2, block.bn2, block.conv3, block.bn3]:
+                    print("layer_", layer_index+1," bottleneck: ", index, " ", i, " weight on ", i.weight.device)
+                print("layer_", layer_index+1," bottleneck: ", index, " ", block.relu)
+                if index == 0:
+                    print("layer_", layer_index+1," bottleneck ", index, " has downsample layer. In downsample: ")
+                    print("     downsample", index, " ", block.downsample[0], " weight on ", block.downsample[0].weight.device)
+                    print("     downsample", index, " ", block.downsample[0], " weight on ", block.downsample[1].weight.device)
+        print(model.avgpool, " avgpool layer has no weights")
+        print(model.fc, " weight on ", model.fc.weight.device)
 
 if __name__ == '__main__':
     main()

@@ -63,8 +63,9 @@ Densenet-161             22.35           6.20
 
 from .alexnet import *
 from .vgg import *
+from .vgg_para import *
 from .resnet import *
-from .resnext import *
+from .resnet_para import *
 from .wrn import *
 from .preresnet import *
 from .densenet import *
