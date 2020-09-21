@@ -1,3 +1,9 @@
+# Updating this repo
+
+* Remove bar \& progressbar which is not support by pytorch 1.2+
+
+* Change `x.data[0]` to `x.item()` to match pytorch 1.2+ tensor format.
+
 # pytorch-classification
 Classification on CIFAR-10/100 and ImageNet with PyTorch.
 
