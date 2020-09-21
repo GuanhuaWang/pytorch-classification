@@ -22,6 +22,7 @@ import torchvision.models as models
 import models.imagenet as customized_models
 
 from utils import Logger, AverageMeter, accuracy, mkdir_p, savefig
+from tqdm import tqdm
 
 # Models
 default_model_names = sorted(name for name in models.__dict__
@@ -52,7 +53,7 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--train-batch', default=256, type=int, metavar='N',
                     help='train batchsize (default: 256)')
-parser.add_argument('--test-batch', default=200, type=int, metavar='N',
+parser.add_argument('--test-batch', default=32, type=int, metavar='N',
                     help='test batchsize (default: 200)')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate')
@@ -246,9 +247,9 @@ def train(train_loader, model, criterion, optimizer, epoch, use_cuda):
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1, 5))
-        losses.update(loss.data[0], inputs.size(0))
-        top1.update(prec1[0], inputs.size(0))
-        top5.update(prec5[0], inputs.size(0))
+        losses.update(loss.item(), inputs.size(0))
+        top1.update(prec1.item(), inputs.size(0))
+        top5.update(prec5.item(), inputs.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -289,7 +290,9 @@ def test(val_loader, model, criterion, epoch, use_cuda):
 
     end = time.time()
   #  bar = Bar('Processing', max=len(val_loader))
+    bar = tqdm(total=len(val_loader))
     for batch_idx, (inputs, targets) in enumerate(val_loader):
+        bar.update(1)
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -303,15 +306,28 @@ def test(val_loader, model, criterion, epoch, use_cuda):
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1, 5))
-        losses.update(loss.data[0], inputs.size(0))
-        top1.update(prec1[0], inputs.size(0))
-        top5.update(prec5[0], inputs.size(0))
+        losses.update(loss.item(), inputs.size(0))
+        top1.update(prec1.item(), inputs.size(0))
+        top5.update(prec5.item(), inputs.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
         # plot progress
+        bar.set_description('({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+            batch=batch_idx + 1,
+            size=len(val_loader),
+            data=data_time.avg,
+            bt=batch_time.avg,
+            total='N/A' or bar.elapsed_td,
+            eta='N/A' or bar.eta_td,
+            loss=losses.avg,
+            top1=top1.avg,
+            top5=top5.avg,
+        ))
+    bar.close()
+
    #     bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
    #                 batch=batch_idx + 1,
    #                 size=len(val_loader),
